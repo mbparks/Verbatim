@@ -1,0 +1,529 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VERBATIM // Recorder + Offline Transcriber</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@600;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#14110d; --panel:#1f1b15; --panel-2:#272118;
+    --ink:#e9e0cf; --muted:#8c8270; --line:#3a3226;
+    --amber:#e8a13a; --amber-dim:#7a5a26;
+    --rec:#e0492f; --rec-glow:rgba(224,73,47,.45); --green:#9fb84a;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{
+    background:radial-gradient(120% 80% at 50% -10%, #221d16 0%, var(--bg) 60%), var(--bg);
+    color:var(--ink); font-family:"IBM Plex Mono",ui-monospace,monospace;
+    display:flex;align-items:flex-start;justify-content:center;
+    padding:34px 18px 60px;min-height:100%;
+  }
+  body::after{
+    content:"";position:fixed;inset:0;pointer-events:none;opacity:.045;mix-blend-mode:overlay;
+    background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  }
+  .unit{
+    width:100%;max-width:680px;
+    background:linear-gradient(180deg,var(--panel) 0%,#1a160f 100%);
+    border:1px solid var(--line);border-radius:18px;
+    box-shadow:0 1px 0 rgba(255,255,255,.04) inset, 0 40px 80px -30px rgba(0,0,0,.8);
+    overflow:hidden;
+  }
+  .topbar{
+    display:flex;align-items:center;justify-content:space-between;
+    padding:14px 20px;border-bottom:1px solid var(--line);
+    background:linear-gradient(180deg,var(--panel-2),transparent);
+  }
+  .brand{display:flex;align-items:baseline;gap:12px}
+  .brand h1{font-family:"Syne",sans-serif;font-weight:800;font-size:19px;letter-spacing:.12em;margin:0}
+  .brand .sub{font-size:10px;letter-spacing:.28em;color:var(--muted);text-transform:uppercase}
+  .pill{
+    font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);
+    border:1px solid var(--line);border-radius:999px;padding:5px 10px;white-space:nowrap;
+  }
+
+  .stage{padding:24px 20px 8px}
+  .readout{
+    display:flex;align-items:center;gap:18px;background:#100d09;border:1px solid var(--line);
+    border-radius:12px;padding:16px 18px;box-shadow:0 2px 0 rgba(255,255,255,.03) inset;
+  }
+  .status-dot{width:13px;height:13px;border-radius:50%;background:var(--amber-dim);flex:none;transition:all .2s}
+  .status-dot.live{background:var(--rec);box-shadow:0 0 0 0 var(--rec-glow);animation:pulse 1.4s infinite}
+  @keyframes pulse{0%{box-shadow:0 0 0 0 var(--rec-glow)}70%{box-shadow:0 0 0 12px rgba(224,73,47,0)}100%{box-shadow:0 0 0 0 rgba(224,73,47,0)}}
+  .timer{font-size:42px;font-weight:600;letter-spacing:.02em;line-height:1;font-variant-numeric:tabular-nums}
+  .state-label{margin-left:auto;text-align:right}
+  .state-label .big{font-size:12px;letter-spacing:.2em;text-transform:uppercase;color:var(--amber)}
+  .state-label .small{font-size:10px;color:var(--muted);margin-top:4px}
+
+  .meter{height:64px;margin-top:14px;border:1px solid var(--line);border-radius:12px;background:#100d09;overflow:hidden;position:relative}
+  canvas{display:block;width:100%;height:100%}
+
+  .controls{display:flex;gap:12px;margin-top:18px}
+  button{
+    font-family:inherit;font-size:12px;letter-spacing:.14em;text-transform:uppercase;
+    border:1px solid var(--line);background:var(--panel-2);color:var(--ink);
+    padding:14px 18px;border-radius:11px;cursor:pointer;flex:1;
+    transition:transform .06s ease, background .15s, border-color .15s, opacity .15s;
+    box-shadow:0 2px 0 rgba(0,0,0,.4), 0 1px 0 rgba(255,255,255,.05) inset;
+  }
+  button:hover:not(:disabled){border-color:var(--amber-dim)}
+  button:active:not(:disabled){transform:translateY(2px);box-shadow:0 0 0 rgba(0,0,0,.4)}
+  button:disabled{opacity:.32;cursor:not-allowed}
+  .btn-rec{background:linear-gradient(180deg,#7a2c1f,#5e2017);border-color:#8a3322;color:#ffd9cf}
+  .btn-rec:hover:not(:disabled){border-color:var(--rec)}
+  .btn-rec.armed{background:linear-gradient(180deg,var(--rec),#b53a26);color:#fff}
+
+  .saves{display:flex;gap:12px;margin-top:12px}
+  .btn-save{flex:1}
+  .btn-save .lbl{display:block;font-size:11px}
+  .btn-save .meta{display:block;font-size:9px;color:var(--muted);letter-spacing:.1em;margin-top:4px}
+
+  /* transcription engine panel */
+  .xpanel{margin-top:18px;border:1px solid var(--line);border-radius:12px;background:#100d09;padding:14px 16px}
+  .xrow{display:flex;gap:12px;align-items:stretch}
+  select{
+    flex:1;font-family:inherit;font-size:11px;letter-spacing:.06em;color:var(--ink);
+    background:var(--panel-2);border:1px solid var(--line);border-radius:10px;padding:0 12px;cursor:pointer;
+  }
+  select:focus{outline:none;border-color:var(--amber-dim)}
+  .btn-x{flex:1;margin-top:0;background:linear-gradient(180deg,#8a6420,#6b4c18);border-color:var(--amber-dim);color:#ffe9c4}
+  .btn-x:hover:not(:disabled){border-color:var(--amber)}
+  .xfile{display:flex;align-items:center;gap:8px;margin-top:12px;font-size:10px;letter-spacing:.1em;color:var(--muted);text-transform:uppercase}
+  .xfile label{color:var(--amber-dim);cursor:pointer;border-bottom:1px dashed var(--amber-dim)}
+  .xfile input{display:none}
+  .xprog{margin-top:12px;display:none}
+  .xprog.show{display:block}
+  .xstatus{font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--amber);margin-bottom:7px;display:flex;justify-content:space-between}
+  .xbar{height:6px;border-radius:4px;background:#2a2419;overflow:hidden;border:1px solid var(--line)}
+  .xbar i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--amber-dim),var(--amber));transition:width .2s}
+  .xbar.indet i{width:35%;animation:slide 1.2s ease-in-out infinite}
+  @keyframes slide{0%{margin-left:-35%}100%{margin-left:100%}}
+
+  .transcript-wrap{padding:8px 20px 22px}
+  .transcript-head{display:flex;align-items:center;justify-content:space-between;margin:14px 0 8px}
+  .transcript-head .t{font-size:10px;letter-spacing:.3em;text-transform:uppercase;color:var(--muted)}
+  .transcript-head .tag{font-size:10px;letter-spacing:.14em;color:var(--green)}
+  textarea{
+    width:100%;min-height:150px;resize:vertical;background:#100d09;color:var(--ink);
+    border:1px solid var(--line);border-radius:12px;padding:16px;font-family:inherit;
+    font-size:13px;line-height:1.65;box-shadow:0 2px 0 rgba(255,255,255,.03) inset;
+  }
+  textarea:focus{outline:none;border-color:var(--amber-dim)}
+
+  .note{font-size:11px;color:var(--muted);line-height:1.6;border-top:1px solid var(--line);margin:0;padding:16px 20px 20px}
+  .note b{color:var(--amber);font-weight:600}
+  .err{display:none;background:#2a1410;border:1px solid #5e2017;color:#f0b6aa;border-radius:10px;padding:12px 14px;margin:14px 20px 0;font-size:12px;line-height:1.5}
+  .err.show{display:block}
+
+  .credit{
+    display:flex;align-items:center;justify-content:space-between;border-top:1px solid var(--line);
+    padding:13px 20px 16px;font-size:9.5px;letter-spacing:.28em;text-transform:uppercase;color:var(--amber-dim);
+  }
+  .credit .by{color:var(--muted);letter-spacing:.2em}
+
+  @media (max-width:480px){
+    body{padding:14px 10px 40px}
+    .unit{border-radius:14px}
+    .topbar{padding:12px 14px}
+    .brand{flex-direction:column;gap:2px}
+    .brand h1{font-size:17px}
+    .stage{padding:16px 14px 8px}
+    .readout{gap:12px;padding:14px}
+    .timer{font-size:34px}
+    .state-label .big{font-size:11px}
+    .controls{flex-wrap:wrap}
+    .controls button{flex:1 1 100%;padding:15px}
+    .controls .btn-rec{order:-1}
+    .saves{flex-direction:column}
+    .xrow{flex-direction:column}
+    .transcript-wrap{padding:8px 14px 18px}
+    .note,.credit,.xpanel{padding-left:14px;padding-right:14px}
+  }
+</style>
+</head>
+<body>
+  <div class="unit">
+    <div class="topbar">
+      <div class="brand">
+        <h1>VERBATIM</h1>
+        <span class="sub">record · transcribe · offline</span>
+      </div>
+      <div class="pill" id="enginePill">engine idle</div>
+    </div>
+
+    <div class="stage">
+      <div class="readout">
+        <div class="status-dot" id="dot"></div>
+        <div class="timer" id="timer">00:00.0</div>
+        <div class="state-label">
+          <div class="big" id="stateBig">STANDBY</div>
+          <div class="small" id="stateSmall">microphone idle</div>
+        </div>
+      </div>
+
+      <div class="meter"><canvas id="scope"></canvas></div>
+
+      <div class="controls">
+        <button id="recBtn" class="btn-rec">● Record</button>
+        <button id="stopBtn" disabled>■ Stop</button>
+        <button id="resetBtn" disabled>↺ New</button>
+      </div>
+
+      <div class="saves">
+        <button id="wavBtn" class="btn-save" disabled>
+          <span class="lbl">⬇ Save .WAV</span>
+          <span class="meta" id="wavMeta">no audio yet</span>
+        </button>
+        <button id="txtBtn" class="btn-save" disabled>
+          <span class="lbl">⬇ Save .TXT</span>
+          <span class="meta" id="txtMeta">no transcript yet</span>
+        </button>
+      </div>
+
+      <div class="xpanel">
+        <div class="xrow">
+          <select id="modelSel">
+            <option value="tiny">model: tiny.en · fastest · ~40 MB</option>
+            <option value="base" selected>model: base.en · balanced · ~80 MB</option>
+            <option value="small">model: small.en · most accurate · ~250 MB</option>
+          </select>
+          <button id="xBtn" class="btn-x" disabled>✎ Transcribe</button>
+        </div>
+        <div class="xfile">
+          <span>or</span>
+          <label for="fileIn">load an audio file</label>
+          <input type="file" id="fileIn" accept="audio/*">
+        </div>
+        <div class="xprog" id="xprog">
+          <div class="xstatus"><span id="xstatusText">working</span><span id="xstatusPct"></span></div>
+          <div class="xbar" id="xbar"><i id="xbarFill"></i></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="err" id="err"></div>
+
+    <div class="transcript-wrap">
+      <div class="transcript-head">
+        <span class="t">Transcript</span>
+        <span class="tag" id="tag"></span>
+      </div>
+      <textarea id="transcript" placeholder="Record or load audio, then press Transcribe. Edit freely before saving."></textarea>
+    </div>
+
+    <p class="note">
+      <b>Offline transcription.</b> Audio is transcribed locally with Whisper. Nothing is sent to a
+      server. The first run downloads the chosen model once (sizes above), then it is cached for
+      future use. The microphone needs a secure context, so open this over <b>https</b> or
+      <b>localhost</b>; on iOS it must be <b>Safari itself</b>, not a home-screen app or in-app browser.
+      The model is fetched from a CDN at first use, so the very first transcription needs a network
+      connection. Transcription runs in the background and is slower on phones than on desktops.
+    </p>
+
+    <div class="credit"><span>Instrument 002</span><span class="by">by M.B. Parks</span></div>
+  </div>
+
+<script>
+(() => {
+  "use strict";
+  const $ = id => document.getElementById(id);
+  const recBtn=$("recBtn"), stopBtn=$("stopBtn"), resetBtn=$("resetBtn");
+  const wavBtn=$("wavBtn"), txtBtn=$("txtBtn"), wavMeta=$("wavMeta"), txtMeta=$("txtMeta");
+  const timerEl=$("timer"), dot=$("dot"), stateBig=$("stateBig"), stateSmall=$("stateSmall");
+  const transcript=$("transcript"), tag=$("tag"), enginePill=$("enginePill"), errBox=$("err");
+  const canvas=$("scope"), ctx=canvas.getContext("2d");
+  const modelSel=$("modelSel"), xBtn=$("xBtn"), fileIn=$("fileIn");
+  const xprog=$("xprog"), xstatusText=$("xstatusText"), xstatusPct=$("xstatusPct");
+  const xbar=$("xbar"), xbarFill=$("xbarFill");
+
+  // ---------- state ----------
+  let audioCtx, source, processor, analyser, zeroGain, stream;
+  let pcmChunks=[], pcmLength=0;
+  let recording=false, t0=0, rafTimer=null, rafScope=null;
+  let wavBlob=null, currentAudio=null;          // currentAudio = { data:Float32Array, rate:Number }
+  let wakeLock=null, worker=null, busy=false;
+
+  const MODELS = {
+    tiny:  "Xenova/whisper-tiny.en",
+    base:  "Xenova/whisper-base.en",
+    small: "Xenova/whisper-small.en"
+  };
+
+  const isIOS = /iP(hone|ad|od)/.test(navigator.platform) ||
+                (navigator.userAgent.includes("Mac") && "ontouchend" in document);
+
+  // ---------- wake lock ----------
+  async function requestWakeLock(){ try { if ("wakeLock" in navigator) wakeLock = await navigator.wakeLock.request("screen"); } catch(_){} }
+  function releaseWakeLock(){ try { if (wakeLock){ wakeLock.release(); wakeLock=null; } } catch(_){} }
+  document.addEventListener("visibilitychange", () => {
+    if (recording && document.visibilityState === "visible" && !wakeLock) requestWakeLock();
+  });
+
+  // ---------- recording ----------
+  async function startRecording(){
+    hideErr();
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio:{ channelCount:1, echoCancellation:true, noiseSuppression:true, autoGainControl:true }
+      });
+    } catch(err){
+      showErr("Could not access the microphone: " + err.message +
+              ". Check the browser permission, and make sure you are on https or localhost (file:// does not grant the mic on iOS).");
+      return;
+    }
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === "suspended"){ try { await audioCtx.resume(); } catch(_){} }
+    requestWakeLock();
+    const rate = audioCtx.sampleRate;
+    source = audioCtx.createMediaStreamSource(stream);
+    analyser = audioCtx.createAnalyser(); analyser.fftSize = 1024; source.connect(analyser);
+
+    processor = audioCtx.createScriptProcessor(4096, 1, 1);
+    pcmChunks=[]; pcmLength=0;
+    processor.onaudioprocess = (e) => {
+      if (!recording) return;
+      const input = e.inputBuffer.getChannelData(0);
+      pcmChunks.push(new Float32Array(input)); pcmLength += input.length;
+    };
+    source.connect(processor);
+    zeroGain = audioCtx.createGain(); zeroGain.gain.value = 0;
+    processor.connect(zeroGain); zeroGain.connect(audioCtx.destination);
+
+    recording = true; t0 = performance.now();
+    transcript.value=""; tag.textContent=""; wavBlob=null; currentAudio=null;
+
+    recBtn.classList.add("armed");
+    recBtn.disabled=true; stopBtn.disabled=false; resetBtn.disabled=true;
+    wavBtn.disabled=true; txtBtn.disabled=true; xBtn.disabled=true; fileIn.disabled=true; modelSel.disabled=true;
+    dot.classList.add("live");
+    stateBig.textContent="RECORDING"; stateSmall.textContent=(rate/1000)+" kHz · mono · 16-bit";
+    wavMeta.textContent="capturing…";
+    tickTimer(); drawScope();
+  }
+
+  function stopRecording(){
+    if (!recording) return;
+    recording=false; releaseWakeLock();
+    if (rafTimer) cancelAnimationFrame(rafTimer);
+    if (rafScope) cancelAnimationFrame(rafScope);
+    const rate = audioCtx ? audioCtx.sampleRate : 48000;
+    try { processor.disconnect(); source.disconnect(); analyser.disconnect(); zeroGain.disconnect(); } catch(_){}
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    if (audioCtx) audioCtx.close();
+
+    const merged = mergeChunks(pcmChunks, pcmLength);
+    setAudio(merged, rate);
+
+    dot.classList.remove("live"); recBtn.classList.remove("armed");
+    stopBtn.disabled=true; resetBtn.disabled=false; modelSel.disabled=false; fileIn.disabled=false;
+    stateBig.textContent="READY"; stateSmall.textContent="recording captured";
+    drawIdleScope();
+  }
+
+  function resetAll(){
+    if (busy) return;
+    currentAudio=null; wavBlob=null; transcript.value=""; tag.textContent="";
+    timerEl.textContent="00:00.0";
+    stateBig.textContent="STANDBY"; stateSmall.textContent="microphone idle";
+    wavMeta.textContent="no audio yet"; txtMeta.textContent="no transcript yet";
+    recBtn.disabled=false; stopBtn.disabled=true; resetBtn.disabled=true;
+    wavBtn.disabled=true; txtBtn.disabled=true; xBtn.disabled=true; fileIn.disabled=false; modelSel.disabled=false;
+    hideErr(); xprog.classList.remove("show"); drawIdleScope();
+  }
+
+  // ---------- audio handling ----------
+  function setAudio(float32, rate){
+    currentAudio = { data:float32, rate:rate };
+    const view = encodeWAV(float32, rate);
+    wavBlob = new Blob([view], { type:"audio/wav" });
+    const dur = float32.length / rate;
+    wavMeta.textContent = formatBytes(wavBlob.size) + " · " + dur.toFixed(1) + "s";
+    wavBtn.disabled=false; xBtn.disabled = busy;
+  }
+
+  fileIn.addEventListener("change", async (e) => {
+    const f = e.target.files && e.target.files[0];
+    if (!f) return;
+    hideErr();
+    try {
+      const buf = await f.arrayBuffer();
+      const tmp = new (window.AudioContext || window.webkitAudioContext)();
+      const decoded = await tmp.decodeAudioData(buf);
+      const len = decoded.length, chs = decoded.numberOfChannels;
+      const mono = new Float32Array(len);
+      for (let c=0;c<chs;c++){ const d=decoded.getChannelData(c); for (let i=0;i<len;i++) mono[i]+=d[i]/chs; }
+      const rate = decoded.sampleRate; tmp.close();
+      setAudio(mono, rate);
+      transcript.value=""; tag.textContent="";
+      stateBig.textContent="LOADED"; stateSmall.textContent=f.name.slice(0,28);
+      resetBtn.disabled=false;
+    } catch(err){
+      showErr("Could not read that audio file: " + err.message);
+    }
+    fileIn.value = "";
+  });
+
+  function mergeChunks(chunks, len){
+    const out = new Float32Array(len); let off=0;
+    for (const c of chunks){ out.set(c, off); off += c.length; } return out;
+  }
+  function encodeWAV(samples, rate){
+    const buffer = new ArrayBuffer(44 + samples.length*2), view = new DataView(buffer);
+    const ws = (off,s)=>{ for(let i=0;i<s.length;i++) view.setUint8(off+i, s.charCodeAt(i)); };
+    ws(0,"RIFF"); view.setUint32(4, 36 + samples.length*2, true); ws(8,"WAVE"); ws(12,"fmt ");
+    view.setUint32(16,16,true); view.setUint16(20,1,true); view.setUint16(22,1,true);
+    view.setUint32(24,rate,true); view.setUint32(28,rate*2,true); view.setUint16(32,2,true); view.setUint16(34,16,true);
+    ws(36,"data"); view.setUint32(40, samples.length*2, true);
+    let off=44;
+    for (let i=0;i<samples.length;i++){ let s=Math.max(-1,Math.min(1,samples[i])); view.setInt16(off, s<0?s*0x8000:s*0x7FFF, true); off+=2; }
+    return view;
+  }
+
+  // ---------- resample to 16 kHz for Whisper ----------
+  async function resample16k(float32, fromRate){
+    if (fromRate === 16000) return float32;
+    try {
+      const n = Math.ceil(float32.length * 16000 / fromRate);
+      const off = new OfflineAudioContext(1, n, 16000);
+      const b = off.createBuffer(1, float32.length, fromRate);
+      b.copyToChannel(float32, 0);
+      const src = off.createBufferSource(); src.buffer=b; src.connect(off.destination); src.start();
+      const out = await off.startRendering();
+      return out.getChannelData(0);
+    } catch(_){
+      const ratio = fromRate/16000, nl = Math.round(float32.length/ratio), out = new Float32Array(nl);
+      for (let i=0;i<nl;i++){ const idx=i*ratio, i0=Math.floor(idx), i1=Math.min(i0+1,float32.length-1), fr=idx-i0; out[i]=float32[i0]*(1-fr)+float32[i1]*fr; }
+      return out;
+    }
+  }
+
+  // ---------- whisper worker ----------
+  function ensureWorker(){
+    if (worker) return worker;
+    const code = `
+      import { pipeline, env } from "https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2";
+      env.allowLocalModels = false;
+      let pipe = null, loaded = null;
+      self.onmessage = async (e) => {
+        const { audio, model } = e.data;
+        try {
+          if (!pipe || loaded !== model){
+            self.postMessage({ type:"status", text:"Downloading model" });
+            pipe = await pipeline("automatic-speech-recognition", model, {
+              progress_callback: (p) => self.postMessage({ type:"progress", data:p })
+            });
+            loaded = model;
+          }
+          self.postMessage({ type:"status", text:"Transcribing" });
+          const out = await pipe(audio, { chunk_length_s:30, stride_length_s:5 });
+          self.postMessage({ type:"result", text:(out && out.text ? out.text : "").trim() });
+        } catch(err){
+          self.postMessage({ type:"error", text:String(err && err.message ? err.message : err) });
+        }
+      };
+    `;
+    const url = URL.createObjectURL(new Blob([code], { type:"text/javascript" }));
+    worker = new Worker(url, { type:"module" });
+    worker.onmessage = onWorkerMessage;
+    worker.onerror = (e) => { failTranscription("Engine failed to start. If hosting yourself, allow scripts from the CDN, or self-host Transformers.js. (" + (e.message||"") + ")"); };
+    return worker;
+  }
+
+  function onWorkerMessage(e){
+    const m = e.data;
+    if (m.type === "progress"){
+      const d = m.data || {};
+      if (d.status === "progress" && typeof d.progress === "number"){
+        xbar.classList.remove("indet");
+        xbarFill.style.width = Math.min(100, d.progress).toFixed(0) + "%";
+        xstatusPct.textContent = Math.min(100, d.progress).toFixed(0) + "%";
+      }
+    } else if (m.type === "status"){
+      xstatusText.textContent = m.text;
+      if (m.text === "Transcribing"){ xbar.classList.add("indet"); xbarFill.style.width=""; xstatusPct.textContent=""; }
+    } else if (m.type === "result"){
+      finishTranscription(m.text);
+    } else if (m.type === "error"){
+      failTranscription(m.text);
+    }
+  }
+
+  async function transcribe(){
+    if (!currentAudio || busy) return;
+    busy = true; hideErr();
+    xBtn.disabled=true; recBtn.disabled=true; resetBtn.disabled=true; fileIn.disabled=true; modelSel.disabled=true;
+    enginePill.textContent = "engine working";
+    tag.textContent = "transcribing…";
+    xprog.classList.add("show"); xbar.classList.remove("indet");
+    xstatusText.textContent = "Preparing audio"; xstatusPct.textContent=""; xbarFill.style.width="0%";
+
+    try {
+      const audio16 = await resample16k(currentAudio.data, currentAudio.rate);
+      const model = MODELS[modelSel.value];
+      ensureWorker().postMessage({ audio:audio16, model }, [audio16.buffer]);
+    } catch(err){
+      failTranscription("Could not prepare audio: " + err.message);
+    }
+  }
+
+  function finishTranscription(text){
+    busy=false;
+    transcript.value = text;
+    tag.textContent = "done";
+    xprog.classList.remove("show"); xbar.classList.remove("indet");
+    enginePill.textContent = "engine ready";
+    xBtn.disabled=false; recBtn.disabled=false; resetBtn.disabled=false; fileIn.disabled=false; modelSel.disabled=false;
+    updateTxtMeta();
+  }
+  function failTranscription(msg){
+    busy=false; showErr(msg); tag.textContent="";
+    xprog.classList.remove("show"); xbar.classList.remove("indet");
+    enginePill.textContent = "engine error";
+    xBtn.disabled=false; recBtn.disabled=false; resetBtn.disabled=false; fileIn.disabled=false; modelSel.disabled=false;
+  }
+
+  // ---------- downloads ----------
+  function stamp(){ const d=new Date(), p=n=>String(n).padStart(2,"0"); return `${d.getFullYear()}${p(d.getMonth()+1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`; }
+  function download(blob, name){ const a=document.createElement("a"); a.href=URL.createObjectURL(blob); a.download=name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(a.href),1000); }
+  wavBtn.onclick = () => { if (wavBlob) download(wavBlob, `recording-${stamp()}.wav`); };
+  txtBtn.onclick = () => { const t=transcript.value.trim(); if (t) download(new Blob([t],{type:"text/plain"}), `transcript-${stamp()}.txt`); };
+
+  // ---------- meta / timer / scope ----------
+  function updateTxtMeta(){
+    const t = transcript.value.trim(); const words = t ? t.split(/\s+/).length : 0;
+    txtMeta.textContent = words ? words+" words" : "no transcript yet";
+    txtBtn.disabled = (t.length === 0);
+  }
+  function formatBytes(b){ if (b<1024) return b+" B"; if (b<1048576) return (b/1024).toFixed(0)+" KB"; return (b/1048576).toFixed(1)+" MB"; }
+  function tickTimer(){ const ms=performance.now()-t0, total=ms/1000, m=Math.floor(total/60), s=Math.floor(total%60), tenths=Math.floor((ms%1000)/100); timerEl.textContent=String(m).padStart(2,"0")+":"+String(s).padStart(2,"0")+"."+tenths; if (recording) rafTimer=requestAnimationFrame(tickTimer); }
+  function fitCanvas(){ const r=canvas.getBoundingClientRect(), dpr=window.devicePixelRatio||1; canvas.width=r.width*dpr; canvas.height=r.height*dpr; ctx.setTransform(1,0,0,1,0,0); ctx.scale(dpr,dpr); }
+  function drawIdleScope(){ const w=canvas.clientWidth, h=canvas.clientHeight; ctx.clearRect(0,0,w,h); ctx.strokeStyle="#3a3226"; ctx.lineWidth=1.5; ctx.beginPath(); ctx.moveTo(0,h/2); ctx.lineTo(w,h/2); ctx.stroke(); }
+  function drawScope(){
+    if (!recording || !analyser) return;
+    const w=canvas.clientWidth, h=canvas.clientHeight, buf=new Uint8Array(analyser.fftSize);
+    analyser.getByteTimeDomainData(buf); ctx.clearRect(0,0,w,h);
+    ctx.lineWidth=2; ctx.strokeStyle="#e8a13a"; ctx.shadowBlur=8; ctx.shadowColor="rgba(232,161,58,.5)";
+    ctx.beginPath(); const slice=w/buf.length;
+    for (let i=0;i<buf.length;i++){ const v=buf[i]/128.0, y=(v*h)/2, x=i*slice; i===0?ctx.moveTo(x,y):ctx.lineTo(x,y); }
+    ctx.stroke(); ctx.shadowBlur=0; rafScope=requestAnimationFrame(drawScope);
+  }
+
+  function showErr(m){ errBox.textContent=m; errBox.classList.add("show"); }
+  function hideErr(){ errBox.classList.remove("show"); }
+
+  // ---------- wire up ----------
+  recBtn.onclick=startRecording; stopBtn.onclick=stopRecording; resetBtn.onclick=resetAll;
+  xBtn.onclick=transcribe; transcript.addEventListener("input", updateTxtMeta);
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+    recBtn.disabled=true; showErr("This browser does not expose getUserMedia. You can still load an audio file to transcribe.");
+  }
+  window.addEventListener("resize", () => { fitCanvas(); if (!recording) drawIdleScope(); });
+  fitCanvas(); drawIdleScope();
+})();
+</script>
+</body>
+</html>
