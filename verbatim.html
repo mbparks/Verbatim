@@ -116,6 +116,15 @@
   .transcript-head{display:flex;align-items:center;justify-content:space-between;margin:14px 0 8px}
   .transcript-head .t{font-size:10px;letter-spacing:.3em;text-transform:uppercase;color:var(--muted)}
   .transcript-head .tag{font-size:10px;letter-spacing:.14em;color:var(--green)}
+  .segments{display:none;max-height:200px;overflow-y:auto;margin-bottom:10px;border:1px solid var(--line);border-radius:12px;background:#100d09;padding:6px}
+  .segments.show{display:block}
+  .seg{display:flex;gap:12px;align-items:baseline;padding:7px 10px;border-radius:8px;cursor:pointer;transition:background .12s}
+  .seg:hover{background:#211c14}
+  .seg .ts{flex:none;font-size:11px;color:var(--amber-dim);font-variant-numeric:tabular-nums;letter-spacing:.04em}
+  .seg .tx{font-size:13px;line-height:1.5;color:var(--ink)}
+  .seg.active{background:#2a2114}
+  .seg.active .ts{color:var(--amber)}
+  .seg.active .tx{color:#fff}
   textarea{
     width:100%;min-height:150px;resize:vertical;background:#100d09;color:var(--ink);
     border:1px solid var(--line);border-radius:12px;padding:16px;font-family:inherit;
@@ -203,9 +212,9 @@
       <div class="xpanel">
         <div class="xrow">
           <select id="modelSel">
-            <option value="tiny">model: tiny.en · fastest · ~40 MB</option>
-            <option value="base" selected>model: base.en · balanced · ~80 MB</option>
-            <option value="small">model: small.en · most accurate · ~250 MB</option>
+            <option value="tiny">model: tiny.en · fastest · lightest download</option>
+            <option value="base" selected>model: base.en · balanced</option>
+            <option value="small">model: small.en · most accurate · heaviest</option>
           </select>
           <button id="xBtn" class="btn-x" disabled>✎ Transcribe</button>
         </div>
@@ -228,16 +237,20 @@
         <span class="t">Transcript</span>
         <span class="tag" id="tag"></span>
       </div>
+      <div class="segments" id="segments" aria-label="Clickable timestamped segments"></div>
       <textarea id="transcript" placeholder="Record or load audio, then press Transcribe. Edit freely before saving."></textarea>
     </div>
 
     <p class="note">
       <b>Offline transcription.</b> Audio is transcribed locally with Whisper. Nothing is sent to a
-      server. The first run downloads the chosen model once (sizes above), then it is cached for
-      future use. The microphone needs a secure context, so open this over <b>https</b> or
-      <b>localhost</b>; on iOS it must be <b>Safari itself</b>, not a home-screen app or in-app browser.
-      The model is fetched from a CDN at first use, so the very first transcription needs a network
-      connection. Transcription runs in the background and is slower on phones than on desktops.
+      server. On devices with <b>WebGPU</b> (including recent iPhones) the engine runs on the GPU and
+      is much faster; otherwise it falls back to the CPU automatically. The badge at the top right
+      shows which backend is active. The first run downloads the chosen model once, then it is cached.
+      After transcribing, each line in the transcript is a <b>clickable timestamp</b> that jumps the
+      playback to that moment, and the current line highlights as the audio plays. The microphone
+      needs a secure context, so open this over <b>https</b> or <b>localhost</b>; on iOS it must be
+      <b>Safari itself</b>, not a home-screen app or in-app browser. The engine is fetched from a CDN
+      at first use, so the very first transcription needs a network connection.
     </p>
 
     <div class="credit"><span>Instrument 002</span><span class="by">by M.B. Parks</span></div>
@@ -255,20 +268,21 @@
   const modelSel=$("modelSel"), xBtn=$("xBtn"), fileIn=$("fileIn");
   const xprog=$("xprog"), xstatusText=$("xstatusText"), xstatusPct=$("xstatusPct");
   const xbar=$("xbar"), xbarFill=$("xbarFill");
-  const player=$("player"), audioEl=$("audioEl");
+  const player=$("player"), audioEl=$("audioEl"), segmentsEl=$("segments");
 
   // ---------- state ----------
-  let audioCtx, source, processor, analyser, zeroGain, stream;
-  let pcmChunks=[], pcmLength=0;
+  let audioCtx, source, workletNode, analyser, stream;
+  let pcmChunks=[], pcmLength=0, flushResolve=null;
   let recording=false, t0=0, rafTimer=null, rafScope=null;
   let wavBlob=null, currentAudio=null;          // currentAudio = { data:Float32Array, rate:Number }
-  let playUrl=null;
+  let playUrl=null, workletUrl=null;
   let wakeLock=null, worker=null, busy=false;
+  let segments=[], activeSeg=-1;                // [{start,end,text}]
 
   const MODELS = {
-    tiny:  "Xenova/whisper-tiny.en",
-    base:  "Xenova/whisper-base.en",
-    small: "Xenova/whisper-small.en"
+    tiny:  "onnx-community/whisper-tiny.en",
+    base:  "onnx-community/whisper-base.en",
+    small: "onnx-community/whisper-small.en"
   };
 
   const isIOS = /iP(hone|ad|od)/.test(navigator.platform) ||
@@ -280,6 +294,41 @@
   document.addEventListener("visibilitychange", () => {
     if (recording && document.visibilityState === "visible" && !wakeLock) requestWakeLock();
   });
+
+  // ---------- audio worklet (capture on the audio render thread) ----------
+  // Buffers samples in 4096-frame blocks and transfers them to the main thread,
+  // so capture never competes with UI work for the main thread.
+  function workletModuleURL(){
+    if (workletUrl) return workletUrl;
+    const src = `
+      class VerbatimRecorder extends AudioWorkletProcessor {
+        constructor(){ super(); this._buf = new Float32Array(4096); this._n = 0;
+          this.port.onmessage = (e) => {
+            if (e.data === "flush"){
+              if (this._n > 0){ const tail = this._buf.slice(0, this._n); this.port.postMessage(tail, [tail.buffer]); this._n = 0; }
+              this.port.postMessage("flushed");
+            }
+          };
+        }
+        process(inputs){
+          const ch = inputs[0] && inputs[0][0];
+          if (ch){
+            for (let i=0;i<ch.length;i++){
+              this._buf[this._n++] = ch[i];
+              if (this._n === this._buf.length){
+                this.port.postMessage(this._buf, [this._buf.buffer]);
+                this._buf = new Float32Array(4096); this._n = 0;
+              }
+            }
+          }
+          return true;
+        }
+      }
+      registerProcessor("verbatim-recorder", VerbatimRecorder);
+    `;
+    workletUrl = URL.createObjectURL(new Blob([src], { type:"text/javascript" }));
+    return workletUrl;
+  }
 
   // ---------- recording ----------
   async function startRecording(){
@@ -295,25 +344,35 @@
     }
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     if (audioCtx.state === "suspended"){ try { await audioCtx.resume(); } catch(_){} }
+
+    try {
+      await audioCtx.audioWorklet.addModule(workletModuleURL());
+    } catch(err){
+      showErr("Audio engine failed to start (AudioWorklet): " + err.message + ". Use a recent browser over https or localhost.");
+      if (stream) stream.getTracks().forEach(t => t.stop());
+      try { await audioCtx.close(); } catch(_){}
+      return;
+    }
+
     requestWakeLock();
     const rate = audioCtx.sampleRate;
     source = audioCtx.createMediaStreamSource(stream);
     analyser = audioCtx.createAnalyser(); analyser.fftSize = 1024; source.connect(analyser);
 
-    processor = audioCtx.createScriptProcessor(4096, 1, 1);
     pcmChunks=[]; pcmLength=0;
-    processor.onaudioprocess = (e) => {
+    workletNode = new AudioWorkletNode(audioCtx, "verbatim-recorder");
+    workletNode.port.onmessage = (e) => {
+      if (e.data === "flushed"){ if (flushResolve){ flushResolve(); flushResolve=null; } return; }
       if (!recording) return;
-      const input = e.inputBuffer.getChannelData(0);
-      pcmChunks.push(new Float32Array(input)); pcmLength += input.length;
+      pcmChunks.push(e.data); pcmLength += e.data.length;
     };
-    source.connect(processor);
-    zeroGain = audioCtx.createGain(); zeroGain.gain.value = 0;
-    processor.connect(zeroGain); zeroGain.connect(audioCtx.destination);
+    // Worklet writes no output, so routing it to the destination stays silent
+    // while keeping the node actively pulled by the graph.
+    source.connect(workletNode); workletNode.connect(audioCtx.destination);
 
     recording = true; t0 = performance.now();
     transcript.value=""; tag.textContent=""; wavBlob=null; currentAudio=null;
-    audioEl.pause(); player.classList.remove("show");
+    audioEl.pause(); player.classList.remove("show"); clearSegments();
 
     recBtn.classList.add("armed");
     recBtn.disabled=true; stopBtn.disabled=false; resetBtn.disabled=true;
@@ -324,17 +383,29 @@
     tickTimer(); drawScope();
   }
 
-  function stopRecording(){
+  async function stopRecording(){
     if (!recording) return;
     recording=false; releaseWakeLock();
     if (rafTimer) cancelAnimationFrame(rafTimer);
     if (rafScope) cancelAnimationFrame(rafScope);
     const rate = audioCtx ? audioCtx.sampleRate : 48000;
-    try { processor.disconnect(); source.disconnect(); analyser.disconnect(); zeroGain.disconnect(); } catch(_){}
+
+    // Flush whatever partial block is still buffered inside the worklet.
+    if (workletNode){
+      await new Promise((res) => {
+        flushResolve = res;
+        try { workletNode.port.postMessage("flush"); } catch(_){ res(); }
+        setTimeout(() => { if (flushResolve){ flushResolve=null; res(); } }, 300);
+      });
+    }
+
+    try { source.disconnect(); analyser.disconnect(); if (workletNode) workletNode.disconnect(); } catch(_){}
     if (stream) stream.getTracks().forEach(t => t.stop());
     if (audioCtx) audioCtx.close();
+    workletNode = null;
 
     const merged = mergeChunks(pcmChunks, pcmLength);
+    pcmChunks = [];                       // release the per-block copies
     setAudio(merged, rate);
 
     dot.classList.remove("live"); recBtn.classList.remove("armed");
@@ -345,7 +416,7 @@
 
   function resetAll(){
     if (busy) return;
-    currentAudio=null; wavBlob=null; transcript.value=""; tag.textContent="";
+    currentAudio=null; wavBlob=null; transcript.value=""; tag.textContent=""; clearSegments();
     if (playUrl){ URL.revokeObjectURL(playUrl); playUrl=null; }
     audioEl.pause(); audioEl.removeAttribute("src"); audioEl.load(); player.classList.remove("show");
     timerEl.textContent="00:00.0";
@@ -385,7 +456,7 @@
       for (let c=0;c<chs;c++){ const d=decoded.getChannelData(c); for (let i=0;i<len;i++) mono[i]+=d[i]/chs; }
       const rate = decoded.sampleRate; tmp.close();
       setAudio(mono, rate);
-      transcript.value=""; tag.textContent="";
+      transcript.value=""; tag.textContent=""; clearSegments();
       stateBig.textContent="LOADED"; stateSmall.textContent=f.name.slice(0,28);
       resetBtn.disabled=false;
     } catch(err){
@@ -432,22 +503,57 @@
   function ensureWorker(){
     if (worker) return worker;
     const code = `
-      import { pipeline, env } from "https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2";
+      import { pipeline, env } from "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3";
       env.allowLocalModels = false;
-      let pipe = null, loaded = null;
+      let pipe = null, loaded = null, loadedBackend = null;
+
+      async function build(model, backend, progress){
+        if (backend === "webgpu"){
+          // Combination used by the official Whisper WebGPU demos: full-precision
+          // encoder, 4-bit decoder. Keeps the download small and inference fast.
+          return await pipeline("automatic-speech-recognition", model, {
+            device: "webgpu",
+            dtype: { encoder_model: "fp32", decoder_model_merged: "q4" },
+            progress_callback: progress
+          });
+        }
+        return await pipeline("automatic-speech-recognition", model, {
+          device: "wasm", dtype: "q8", progress_callback: progress
+        });
+      }
+
       self.onmessage = async (e) => {
         const { audio, model } = e.data;
+        const progress = (p) => self.postMessage({ type:"progress", data:p });
         try {
           if (!pipe || loaded !== model){
+            const wantGPU = (typeof navigator !== "undefined" && "gpu" in navigator);
             self.postMessage({ type:"status", text:"Downloading model" });
-            pipe = await pipeline("automatic-speech-recognition", model, {
-              progress_callback: (p) => self.postMessage({ type:"progress", data:p })
-            });
+            try {
+              pipe = await build(model, wantGPU ? "webgpu" : "wasm", progress);
+              loadedBackend = wantGPU ? "webgpu" : "wasm";
+            } catch(gpuErr){
+              // WebGPU unsupported on this device/model: fall back cleanly.
+              self.postMessage({ type:"status", text:"Falling back to CPU" });
+              pipe = await build(model, "wasm", progress);
+              loadedBackend = "wasm";
+            }
             loaded = model;
+            self.postMessage({ type:"backend", backend: loadedBackend });
           }
           self.postMessage({ type:"status", text:"Transcribing" });
-          const out = await pipe(audio, { chunk_length_s:30, stride_length_s:5 });
-          self.postMessage({ type:"result", text:(out && out.text ? out.text : "").trim() });
+          const out = await pipe(audio, {
+            chunk_length_s: 30, stride_length_s: 5, return_timestamps: true
+          });
+          self.postMessage({
+            type:"result",
+            text: (out && out.text ? out.text : "").trim(),
+            chunks: (out && Array.isArray(out.chunks)) ? out.chunks.map(c => ({
+              start: c.timestamp && c.timestamp[0] != null ? c.timestamp[0] : null,
+              end:   c.timestamp && c.timestamp[1] != null ? c.timestamp[1] : null,
+              text:  (c.text || "").trim()
+            })) : []
+          });
         } catch(err){
           self.postMessage({ type:"error", text:String(err && err.message ? err.message : err) });
         }
@@ -472,8 +578,10 @@
     } else if (m.type === "status"){
       xstatusText.textContent = m.text;
       if (m.text === "Transcribing"){ xbar.classList.add("indet"); xbarFill.style.width=""; xstatusPct.textContent=""; }
+    } else if (m.type === "backend"){
+      enginePill.textContent = m.backend === "webgpu" ? "engine: WebGPU" : "engine: CPU (WASM)";
     } else if (m.type === "result"){
-      finishTranscription(m.text);
+      finishTranscription(m.text, m.chunks);
     } else if (m.type === "error"){
       failTranscription(m.text);
     }
@@ -482,6 +590,7 @@
   async function transcribe(){
     if (!currentAudio || busy) return;
     busy = true; hideErr();
+    clearSegments();
     xBtn.disabled=true; recBtn.disabled=true; resetBtn.disabled=true; fileIn.disabled=true; modelSel.disabled=true;
     enginePill.textContent = "engine working";
     tag.textContent = "transcribing…";
@@ -497,12 +606,12 @@
     }
   }
 
-  function finishTranscription(text){
+  function finishTranscription(text, chunks){
     busy=false;
     transcript.value = text;
     tag.textContent = "done";
     xprog.classList.remove("show"); xbar.classList.remove("indet");
-    enginePill.textContent = "engine ready";
+    renderSegments(chunks || []);
     xBtn.disabled=false; recBtn.disabled=false; resetBtn.disabled=false; fileIn.disabled=false; modelSel.disabled=false;
     updateTxtMeta();
   }
@@ -541,6 +650,55 @@
 
   function showErr(m){ errBox.textContent=m; errBox.classList.add("show"); }
   function hideErr(){ errBox.classList.remove("show"); }
+
+  // ---------- clickable timestamped segments ----------
+  function fmtClock(sec){
+    if (sec == null || !isFinite(sec)) return "--:--";
+    const m=Math.floor(sec/60), s=Math.floor(sec%60);
+    return String(m).padStart(2,"0")+":"+String(s).padStart(2,"0");
+  }
+  function clearSegments(){
+    segments=[]; activeSeg=-1; segmentsEl.innerHTML=""; segmentsEl.classList.remove("show");
+  }
+  function renderSegments(chunks){
+    clearSegments();
+    segments = (chunks||[]).filter(c => c.text);
+    if (!segments.length) return;
+    const frag = document.createDocumentFragment();
+    segments.forEach((seg, i) => {
+      const row = document.createElement("div");
+      row.className = "seg"; row.dataset.i = i;
+      const ts = document.createElement("span"); ts.className="ts"; ts.textContent = fmtClock(seg.start);
+      const tx = document.createElement("span"); tx.className="tx"; tx.textContent = seg.text;
+      row.appendChild(ts); row.appendChild(tx);
+      row.addEventListener("click", () => {
+        if (seg.start == null) return;
+        audioEl.currentTime = seg.start;
+        audioEl.play().catch(()=>{});
+      });
+      frag.appendChild(row);
+    });
+    segmentsEl.appendChild(frag);
+    segmentsEl.classList.add("show");
+  }
+  function highlightActiveSegment(){
+    if (!segments.length) return;
+    const t = audioEl.currentTime;
+    let idx = -1;
+    for (let i=0;i<segments.length;i++){
+      const s=segments[i];
+      if (s.start != null && t >= s.start && (s.end == null || t < s.end)){ idx=i; break; }
+    }
+    if (idx === activeSeg) return;
+    const prev = segmentsEl.querySelector(".seg.active");
+    if (prev) prev.classList.remove("active");
+    activeSeg = idx;
+    if (idx >= 0){
+      const el = segmentsEl.querySelector('.seg[data-i="'+idx+'"]');
+      if (el){ el.classList.add("active"); el.scrollIntoView({block:"nearest"}); }
+    }
+  }
+  audioEl.addEventListener("timeupdate", highlightActiveSegment);
 
   // ---------- wire up ----------
   recBtn.onclick=startRecording; stopBtn.onclick=stopRecording; resetBtn.onclick=resetAll;
